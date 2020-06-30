@@ -25,8 +25,10 @@ DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_i
 JHU_REMAP_COLS = c('hosp_curr','incidH','icu_curr','incidICU','incidI','incidD')
 names( JHU_REMAP_COLS) = DATA_OUTPUT_COLS
 
+
+PARTITIONING = c("location","scenario","death_rate","date", "lik_type", "is_final", "sim_id")
 RUNDATE    = format(today(), "%Y%m%d")
-IFR_PREFIX = 'high_death'
+IFR_PREFIX = 'high'
 
 SCENARIOS = tribble(
   ~inpath, ~scenario,
@@ -53,6 +55,10 @@ SCENARIOS = tribble(
 )
 
 
+SCENARIOS_ARROW = tribble(
+  ~scenario,         ~newscenario,
+  "June_inference",  "Inference"
+)
 
 #' Set the credentials to be able to access appropriate S3 bucket
 #'
@@ -72,6 +78,23 @@ s3_set_credentials <- function( override = FALSE )
     "AWS_DEFAULT_REGION"    = AWS_DEFAULT_REGION 
   ))
 }
+
+
+#' Replace ~ in path with path to home dir
+#'
+
+expand_home_dir <- function( path )
+{
+  if( !str_detect(path, "^~"))
+    return( path )
+  
+  wd<-getwd()
+  setwd("~")
+  homedir <- getwd()
+  setwd(wd)
+  str_replace( path, "^~", homedir)
+}
+
 
 #' Set the credentials to be able to access appropriate S3 bucket
 #'
@@ -108,29 +131,20 @@ upload_to_s3 <- function( outputloc, rundate = RUNDATE, latest=FALSE )
 #' Read parquet file of simulation and filters by california FIPS, returns a tibble
 #'
 
-read_jhu_file <- function( file_name )
+read_jhu_onefile <- function( file_name )
 {
   input_df = read_parquet(file_name)
   
   # some scenarios (e.g. Statewide KC 1918) have counties outside of CA, so ensure only CA counties present...
   input_df <- input_df %>% filter( str_detect( geoid, CA_FIPS_REGEX ) ) 
-  
+
   #input_df <- input_df %>% filter( time> ymd("20200401") & time <= ymd("20200410"))
   
   return( input_df )
 }
 
-#' Read all JHU simulation files for all scenarios
-#'
-#' Returns a tibble containing to all simulation runs and all scenarios 
-#' (for a given IFR assumption)
-#'
-
-read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARIOS, IFR = IFR_PREFIX )
+read_jhu_simfiles <- function( inputloc, rundate= RUNDATE, scenarios = SCENARIOS, IFR = IFR_PREFIX )
 {
-  print(paste("INFO: Reading JHU model output from", inputloc,"for date", rundate))
-  # read in the raw model output scenario data for the scenarios in the SCENARIOS global...
-  
   out = NULL
   for(scen_idx in 1:nrow(scenarios))
   {
@@ -154,9 +168,9 @@ read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARI
     for( idx in 1:length(files ))
     {
       file = files[idx]
-
+      
       file_num <- as.numeric(str_extract( file, "[1-9][0-9]*"))
-      df  <- read_jhu_file( file.path( input_dir, file ))
+      df  <- read_jhu_onefile( file.path( input_dir, file ))
       df <- df %>% mutate( file_num = file_num, scenario = scenario )
       df_list[[idx]] <- df
       if(idx%%25 ==0 )
@@ -172,9 +186,44 @@ read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARI
   out
 }
 
+rename_scenario <- function( scenario )
+{
+  ifelse( 
+    is.na( match( scenario, SCENARIOS_ARROW$scenario )),
+    scenario,
+    SCENARIOS_ARROW$newscenario[ match( scenario,SCENARIOS_ARROW$scenario)]
+  )
+}
+
+#' Read all JHU simulation files for all scenarios
+#'
+#' Returns a tibble containing to all simulation runs and all scenarios 
+#' (for a given IFR assumption)
+#'
+
+read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARIOS, IFR = IFR_PREFIX )
+{
+  print(paste("INFO: Reading JHU model output from", inputloc,"for date", rundate))
+  # read in the raw model output scenario data for the scenarios in the SCENARIOS global...
+  if( ymd(rundate ) < ymd( "20200623"))
+    return(read_jhu_simfiles( inputloc, rundate, scenarios, IFR ))
+  
+  # open_dataset doesn't like ~, so expand it in path names
+  inputloc <- expand_home_dir( inputloc )
+  
+  simdir <- file.path(inputloc,rundate, "hosp")
+  sim_arrow <- arrow::open_dataset( simdir, partitioning=PARTITIONING ) %>% collect()
+
+  sim_arrow <- sim_arrow %>% 
+    filter( death_rate == IFR ) %>% 
+    mutate( time= as_date( time, tz="UTC"), file_num = sim_id, scenario = rename_scenario( scenario ) ) %>%
+    rename( !!JHU_REMAP_COLS )
+
+  sim_arrow  
+}
+
 
 #' 25th percentile
-
 q25 <- function(x)
   return( quantile(x, 0.25))
 
@@ -272,8 +321,9 @@ save_csv_by_scenario <- function( summary_df, suffix = NULL, outputloc = OUTPUTL
     if( !is.null( suffix))
       filename <- paste( filename, suffix, sep=".")
     if( !file.exists( file.path(outputloc,rundate)))
-      stop( paste("No directory to write to:",file.path(outputloc,rundate)) )
-    filename <- paste( filename, "csv", sep=".")
+      dir.create(file.path(outputloc,rundate))
+
+        filename <- paste( filename, "csv", sep=".")
     write_csv( write_me, file.path( outputloc, rundate, filename )) 
   }
   invisible( summary_df )
