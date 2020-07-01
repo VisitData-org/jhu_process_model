@@ -1,5 +1,5 @@
 # jhu_model_process
-Code for generating summary aggregates from the simulation runs of JHU's [https://github.com/HopkinsIDD/COVIDScenarioPipeline Covid Scenario Pipeline].
+Code for generating summary aggregates from the simulation runs of JHU's [Covid Scenario Pipeline](https://github.com/HopkinsIDD/COVIDScenarioPipeline).
 
 To use:
 1) export AWS_ACCESS_KEY_ID=\<your id\>; export AWS_SECRET_ACCESS_KEY=\<your key\>
