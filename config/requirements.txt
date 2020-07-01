@@ -23,7 +23,6 @@ boto3==1.9.139
 botocore==1.12.156
 bumpversion==0.5.3
 certifi==2019.11.28
-cffi==1.11.5
 cfn-lint==0.26.0
 chardet==3.0.4
 Click==7.0
@@ -115,10 +114,10 @@ pluggy==0.8.1
 plumbum==1.6.4
 prometheus-client==0.7.1
 prompt-toolkit==2.0.9
-psycopg2==2.7.7
 psycopg2-binary==2.8.2
 ptyprocess==0.6.0
 py==1.7.0
+pyarrow=0.17.1
 pyaml==18.11.0
 pycodestyle==2.5.0
 pycparser==2.19

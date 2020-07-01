@@ -9,6 +9,7 @@ import csv
 import os
 import getpass
 import math
+import re
 
 import pickle
 import functools
@@ -27,6 +28,7 @@ import argparse
 
 START_FROM_CSVS = False
 ADD_COUNTIES = False
+
 
 HOSP_DATA_CSV = "https://data.chhs.ca.gov/dataset/6882c390-b2d7-4b9a-aefa-2068cee63e47/resource/6cd8d424-dfaa-4bdd-9410-a3d656e1176e/download/covid19data.csv"
 HOSP_DATA_NEEDED_COLS = {
@@ -56,7 +58,9 @@ INPUTLOC       = ""
 OUTPUTLOC      = ""
 OUTGRAPH_LOC   = ""
 OUTDATA_LOC    = ""
-TEMPLOC        = "/home/%s/data/temp" % getpass.getuser()
+TEMPLOC        = "~%s/data/temp" % getpass.getuser()
+RUNDATE        = date.today().isoformat().replace('-','')
+
 
 STATE = 'CA'
 DATESLUG = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -72,13 +76,25 @@ AWS_SECRET_ACCESS_KEY = ""
 
 # scenario name to file location
 SCENARIOS = {
-        'No Intervention': 'nonpi-hospitalization/model_output/unifiedNPI/',
-        'Statewide KC 1918': 'kclong-hospitalization/model_output/mid-west-coast-AZ-NV_SocialDistancingLong/',
-        'Statewide Lockdown 8 weeks': 'wuhan-hospitalization/model_output/unifiedWuhan/',
-        'UK-Fixed-8w-FolMild': 'hospitalization/model_output/mid-west-coast-AZ-NV_UKFixed_Mild',
-        'UK-Fatigue-8w-FolMild': 'hospitalization/model_output/mid-west-coast-AZ-NV_UKFatigue_Mild',
-        'UK-Fixed-8w-FolPulse': 'hospitalization/model_output/mid-west-coast-AZ-NV_UKFixed_Pulse',
-        'UK-Fatigue-8w-FolPulse': 'hospitalization/model_output/mid-west-coast-AZ-NV_UKFatigue_Pulse',
+        'nonpi-hospitalization/model_output/unifiedNPI/':                                 'No Intervention',
+        'kclong-hospitalization/model_output/mid-west-coast-AZ-NV_SocialDistancingLong/': 'Statewide KC 1918',
+        'wuhan-hospitalization/model_output/unifiedWuhan/':                               'Statewide Lockdown 8 weeks',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_UKFixed_Mild':                 'UK-Fixed-8w-FolMild',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_UKFatigue_Mild':               'UK-Fatigue-8w-FolMild',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_UKFixed_Pulse':                'UK-Fixed-8w-FolPulse',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_UKFatigue_Pulse':              'UK-Fatigue-8w-FolPulse',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_Lockdown_continued':           'Continued Lockdown',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_Lockdown_fastOpen':            'Fast-paced Reopening',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_Lockdown_moderateOpen':        'Moderate-paced Reopening',
+        'hospitalization/model_output/mid-west-coast-AZ-NV_Lockdown_slowOpen':            'Slow-paced Reopening',
+        'west-coast-AZ-NV_Lockdown_continued':                                            'Continued Lockdown' ,
+        'west-coast-AZ-NV_Lockdown_fastOpen':                                             'Fast-paced Reopening',
+        'west-coast-AZ-NV_Lockdown_moderateOpen':                                         'Moderate-paced Reopening',
+        'west-coast-AZ-NV_Lockdown_slowOpen':                                             'Slow-paced Reopening',
+        'hospitalization/model_output/California_Lockdown_continued':                     'Continued Lockdown',
+        'hospitalization/model_output/California_Lockdown_fastOpen':                      'Fast-paced Reopening',
+        'hospitalization/model_output/California_Lockdown_moderateOpen':                  'Moderate-paced Reopening',
+        'hospitalization/model_output/California_Lockdown_slowOpen':                      'Slow-paced Reopening',
 }
 
 INFILE_PREFIX = 'high_death'
@@ -90,6 +106,8 @@ def setup_argparse():
     parser.add_argument('-o','--output',metavar='inputdir',dest='output',action="store",type=str,required=True,help='base output directory')
     parser.add_argument('--add_counties',action='store_true',default=False,help="set to add county-level data to outputs")
     parser.add_argument('--start_from_csvs',action='store_true',default=False,help="set to skip all data loading and just write to s3")
+    parser.add_argument('-d',metavar='YYYYMMDD',dest='rundate',default=RUNDATE,type=str,action="store",help='run date')
+
     return parser.parse_args()
 
 def get_s3_credentials():
@@ -124,7 +142,7 @@ def setup_dirs():
     os.makedirs(OUTGRAPH_LOC,exist_ok=True)
     os.makedirs(OUTDATA_LOC,exist_ok=True)
 
-    LATESTLOC      = os.path.join(OUTPUTLOC,"%s" % date.today().isoformat().replace('-',''))
+    LATESTLOC      = os.path.join(OUTPUTLOC,"%s" % RUNDATE)
     os.makedirs(LATESTLOC,exist_ok=True)
 
     LATEST_SYMLINK = os.path.join(OUTPUTLOC,"latest")
@@ -143,8 +161,17 @@ def q50(x):
     return x.quantile(0.50)
 
 def restrict_csv_to_ca(filename):
-    input_df = pd.read_csv(filename)
+    #logger().info("Reading from %s" % filename)
+    input_df = pd.read_parquet(filename)
     # some scenarios (e.g. Statewide KC 1918) have counties outside of CA, so ensure only CA counties present...
+    file_numl = re.findall("[0-9]+", filename)
+    if file_numl:
+        file_num = int32(file_numl[0])
+    else
+        logger().error( "No file number in filename %s" % filename )    
+        file_num = 1
+
+    input_df['file_num'] = file_num
     input_df['geoid'] = input_df['geoid'].astype('int32')
     return input_df.loc[(input_df['geoid'] >= BEGIN_CA_COUNTY) & (input_df['geoid'] < END_CA_COUNTY), ]
 
@@ -154,12 +181,12 @@ def read_jhu_model_output():
     # read in the raw model output scenario data for the scenarios in the SCENARIOS global...
     stack_dfs = OrderedDict()
     with Pool(processes=math.ceil(os.cpu_count()/2)) as pool: # or whatever your hardware can support
-        for scenario, inpath in SCENARIOS.items():
+        for inpath, scenario in SCENARIOS.items():
             input_dir = os.path.join(INPUTLOC,inpath)
             if not os.path.exists(input_dir):
                 logger().info("Skipping %s because input directory %s does not exist" % (scenario,input_dir))
                 continue
-            files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.find(INFILE_PREFIX)==0]
+            files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.find(INFILE_PREFIX)==0 ]
             df_list = pool.map(restrict_csv_to_ca,files)
             if len(df_list) == 0:
                 continue
@@ -173,12 +200,12 @@ def write_scenario_csv(scenario,input_pickle):
     all_agg_cols = { k+suff: JHU_REMAP_COLS[k]+suff for suff,k in itertools.product(OUTPUT_SUFFIXES,JHU_REMAP_COLS.keys()) }
     filelist = []
     for col in JHU_REMAP_COLS.keys():
-        new_state_df  = input_df.groupby(['time', 'sim_num']).sum().groupby('time')[col].agg([np.mean, q50, q25, q75])
+        new_state_df  = input_df.groupby(['time', 'file_num']).sum().groupby('time')[col].agg([np.mean, q50, q25, q75])
         new_state_df = new_state_df.reset_index().rename(columns={'mean': col + '_mean', 'q50': col + '_median', 'q25': col + '_q25', 'q75': col + '_q75'})
         new_state_df['time'] = pd.to_datetime(new_state_df['time'])
         all_state_dfs.append(new_state_df.sort_values(by='time'))
         if ADD_COUNTIES:
-            new_county_df = input_df.groupby(['time', 'sim_num','geoid']).sum().groupby(['time','geoid'])[col].agg([np.mean, q50, q25, q75])
+            new_county_df = input_df.groupby(['time', 'file_num','geoid']).sum().groupby(['time','geoid'])[col].agg([np.mean, q50, q25, q75])
             new_county_df = new_county_df.reset_index().rename(columns={'mean': col + '_mean', 'q50': col + '_median', 'q25': col + '_q25', 'q75': col + '_q75'})
             new_county_df['time'] = pd.to_datetime(new_county_df['time'])
             all_county_dfs.append(new_county_df.sort_values(by=['time','geoid']))
@@ -228,7 +255,7 @@ def write_file_to_s3(key,filepath):
 
 def write_scenarios_to_s3(filelist):
     logger().info("Writing scenario data to s3")
-    for s3dir in [ 'latest', date.today().isoformat().replace('-','')]:
+    for s3dir in [ 'latest', RUNDATE ]:
         for f in filelist:
             bname = os.path.basename(f.replace(' ','_').replace(".csv",""))
             key = '%s/%s.csv' % (s3dir,bname)
@@ -280,7 +307,7 @@ def write_actuals_to_s3(input_df):
     filename = "actual_hosp_data.csv"
     actuals_outfile = os.path.join(OUTDATA_LOC,filename)
     input_df.to_csv(actuals_outfile,header=True,index=False)
-    for s3dir in [ 'latest', date.today().isoformat().replace('-','')]:
+    for s3dir in [ 'latest', RUNDATE ]:
         key = '%s/%s' % (s3dir,filename)
         write_file_to_s3(key,actuals_outfile)
 
@@ -289,6 +316,10 @@ if __name__ == "__main__":
     args = setup_argparse()
     OUTPUTLOC = args.output
     INPUTLOC  = args.input
+    # test if rundate parses as date
+    rd = datetime.strptime( args.rundate, "%Y%m%d" )
+    RUNDATE = args.rundate
+
     START_FROM_CSVS = args.start_from_csvs
     ADD_COUNTIES = args.add_counties
 
@@ -302,8 +333,10 @@ if __name__ == "__main__":
     else:
         filelist = glob.glob(os.path.join(OUTPUTLOC,'data','*.csv'))
         scenarios_dict = SCENARIOS
-    get_s3_credentials()
-    write_scenarios_to_s3(filelist)
+
+    # skip s3 upload for now
+    #get_s3_credentials()
+    #write_scenarios_to_s3(filelist)
 
     # writing actuals causes problems for CA, so avoid for now
     # actuals_df = load_actuals()
