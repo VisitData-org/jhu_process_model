@@ -297,12 +297,52 @@ generate_county_summary <- function( jhu_df )
 }
 
 
+generate_reff_summary <- function( inputloc, rundate= RUNDATE, IFR = IFR_PREFIX )
+{
+  print( paste("INFO: Summarizing reff curve statistics for simulation" ) )
+  
+  inputloc <- expand_home_dir( inputloc )
+  
+  # 1. Load spar and snpi files (note code assumes one scenario was run - which applies to last two runs)
+  spar <- arrow::open_dataset( file.path(inputloc,rundate,"spar"), partitioning = PARTITIONING ) %>%
+    collect() %>%         
+    filter(death_rate==IFR) %>%
+    filter(parameter=="R0") %>%
+    mutate( scenario = rename_scenario( scenario ) ) %>%
+    mutate(sim_num = order(sim_id)) %>%
+    rename(sim_r0 = value) %>%
+    select(scenario,sim_num,sim_r0 )
+  
+  snpi<- arrow::open_dataset( file.path(inputloc,rundate,"snpi"), partitioning = PARTITIONING ) %>% collect %>%
+    filter(death_rate==IFR) %>%
+    mutate( scenario = rename_scenario( scenario ) ) %>%
+    group_by(geoid, npi_name )%>%
+    mutate(sim_num = order(sim_id)) %>%
+    select(scenario, sim_num, geoid, npi_name, start_date, end_date, reduction) 
+  
+  simdate<-crossing( sim_num= unique(snpi$sim_num), date=seq( min(snpi$start_date), max(snpi$end_date), by=1))
+  
+  out <- snpi %>% left_join(simdate) %>% 
+    mutate( r0_factor=if_else( date >= start_date & date <= end_date, 1-reduction, 1 )) %>%
+    group_by(scenario,sim_num, geoid,date) %>% summarize( r0_factor=prod(r0_factor)) %>% ungroup %>% 
+    left_join( spar ) %>% 
+    mutate( r_eff = r0_factor*sim_r0) %>%
+    group_by(scenario,geoid, date) %>%
+    summarize(
+      r_eff_mean = mean(r_eff), 
+      r_eff_median = median(r_eff), 
+      r_eff_q25 = quantile(r_eff, 0.25), 
+      r_eff_q75 = quantile(r_eff, 0.75),
+    ) %>%
+    ungroup
+}
+
 #' Save a summary statistics to appropriate CSVs
 #'
 #' Saves one csv per scenario
 #' 
 
-save_csv_by_scenario <- function( summary_df, suffix = NULL, outputloc = OUTPUTLOC, rundate = RUNDATE )
+save_csv_by_scenario <- function( summary_df, outputloc, rundate, suffix = NULL )
 {
   msg <- "INFO: Writing summary statistics to csv" 
   if( !is.null(suffix) )
@@ -323,7 +363,7 @@ save_csv_by_scenario <- function( summary_df, suffix = NULL, outputloc = OUTPUTL
     if( !file.exists( file.path(outputloc,rundate)))
       dir.create(file.path(outputloc,rundate))
 
-        filename <- paste( filename, "csv", sep=".")
+    filename <- paste( filename, "csv", sep=".")
     write_csv( write_me, file.path( outputloc, rundate, filename )) 
   }
   invisible( summary_df )
@@ -340,6 +380,7 @@ is_latest <- function( outputloc, rundate = RUNDATE )
   return( max(datelike) == rundate )
 }
 
+
 #' Load simulation scenarios from raw files, process, and save
 #'
 #' do_counties controls whether to make summaries by county in addition to state summary
@@ -350,12 +391,18 @@ process_jhu_simulation <- function( inputloc, outputloc, rundate = RUNDATE, do_c
   jhu_simulation <- read_jhu_simulation( inputloc, rundate=rundate )
   
   state_summary <- generate_state_summary( jhu_simulation )
-  save_csv_by_scenario( state_summary, NULL, outputloc, rundate )
+  save_csv_by_scenario( state_summary, outputloc, rundate )
   
   if( do_counties )
   {
     county_summary <- generate_county_summary( jhu_simulation )
-    save_csv_by_scenario( county_summary, "county", outputloc, rundate )
+    save_csv_by_scenario( county_summary, outputloc, rundate, "county" )
+  }
+  
+  if( ymd(rundate) >= ymd("20200623"))
+  {
+    reff_summary <- generate_reff_summary(  inputloc, rundate )
+    save_csv_by_scenario( reff_summary, outputloc, rundate, "reff" )
   }
   
   invisible(inputloc)  
