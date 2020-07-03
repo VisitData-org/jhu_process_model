@@ -321,7 +321,7 @@ generate_reff_summary <- function( inputloc, rundate= RUNDATE, IFR = IFR_PREFIX 
     select(scenario, sim_num, geoid, npi_name, start_date, end_date, reduction) 
   
   simdate<-crossing( sim_num= unique(snpi$sim_num), date=seq( min(snpi$start_date), max(snpi$end_date), by=1))
-  
+
   out <- snpi %>% left_join(simdate) %>% 
     mutate( r0_factor=if_else( date >= start_date & date <= end_date, 1-reduction, 1 )) %>%
     group_by(scenario,sim_num, geoid,date) %>% summarize( r0_factor=prod(r0_factor)) %>% ungroup %>% 
