@@ -57,7 +57,8 @@ SCENARIOS = tribble(
 
 SCENARIOS_ARROW = tribble(
   ~scenario,         ~newscenario,
-  "June_inference",  "Inference"
+  "June_inference",  "Inference",
+  "inference",  "Inference",
 )
 
 #' Set the credentials to be able to access appropriate S3 bucket
@@ -407,5 +408,4 @@ process_jhu_simulation <- function( inputloc, outputloc, rundate = RUNDATE, do_c
   
   invisible(inputloc)  
 }
-
 
