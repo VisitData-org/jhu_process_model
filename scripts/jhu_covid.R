@@ -28,7 +28,7 @@ names( JHU_REMAP_COLS) = DATA_OUTPUT_COLS
 
 PARTITIONING = c("location","scenario","death_rate","date", "lik_type", "is_final", "sim_id")
 RUNDATE    = format(today(), "%Y%m%d")
-IFR_PREFIX = 'high'
+IFR_PREFIX = 'med'
 
 SCENARIOS = tribble(
   ~inpath, ~scenario,
