@@ -16,6 +16,7 @@ AWS_ACCESS_KEY_ID     = ""
 AWS_SECRET_ACCESS_KEY = ""
 AWS_DEFAULT_REGION    = "us-east-2"
 S3_BUCKET_NAME        = "jhumodelaggregates"
+MAXDATE               = ymd("21000101")
 
 CA_FIPS_REGEX = "^06[0-9]{3}$"
 
@@ -28,7 +29,7 @@ names( JHU_REMAP_COLS) = DATA_OUTPUT_COLS
 
 PARTITIONING = c("location","scenario","death_rate","date", "lik_type", "is_final", "sim_id")
 RUNDATE    = format(today(), "%Y%m%d")
-IFR_PREFIX = 'med'
+IFR_PREFIX = 'low'
 
 SCENARIOS = tribble(
   ~inpath, ~scenario,
@@ -213,10 +214,11 @@ read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARI
   inputloc <- expand_home_dir( inputloc )
   
   simdir <- file.path(inputloc,rundate, "hosp")
+
   sim_arrow <- arrow::open_dataset( simdir, partitioning=PARTITIONING ) %>% collect()
 
   sim_arrow <- sim_arrow %>% 
-    filter( death_rate == IFR ) %>% 
+    filter( death_rate == IFR & time <= MAXDATE ) %>% 
     mutate( time= as_date( time, tz="UTC"), file_num = sim_id, scenario = rename_scenario( scenario ) ) %>%
     rename( !!JHU_REMAP_COLS )
 
