@@ -6,7 +6,7 @@
 
 shhh <- suppressPackageStartupMessages # It's a library, so shhh!
 
-shhh( require( "arrow" ))
+shhh(require( "arrow" ))
 shhh(require( "lubridate" ))
 shhh(require( "tidyverse" ))
 shhh(require( "argparse"))
@@ -21,9 +21,9 @@ MAXDATE               = ymd("21000101")
 CA_FIPS_REGEX = "^06[0-9]{3}$"
 
 OUTPUT_SUFFIXES = c( '_mean', '_median', '_q25', '_q75' )
-DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_infect','new_deaths' )
+DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_infect','new_deaths', "new_cases" )
 
-JHU_REMAP_COLS = c('hosp_curr','incidH','icu_curr','incidICU','incidI','incidD')
+JHU_REMAP_COLS = c('hosp_curr','incidH','icu_curr','incidICU','incidI','incidD', "incidC")
 names( JHU_REMAP_COLS) = DATA_OUTPUT_COLS
 
 
@@ -197,18 +197,28 @@ rename_scenario <- function( scenario )
   )
 }
 
+#' Allow for scenario dependent IFR
+
+ifr_match <- function( scenario )
+{
+  return( if_else( scenario=="Cases", "low", 
+      if_else( scenario == "Deaths", "med",
+               IFR_PREFIX
+  )))
+}
+
 #' Read all JHU simulation files for all scenarios
 #'
 #' Returns a tibble containing to all simulation runs and all scenarios 
 #' (for a given IFR assumption)
 #'
 
-read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARIOS, IFR = IFR_PREFIX )
+read_jhu_simulation <- function( inputloc, rundate= RUNDATE )
 {
   print(paste("INFO: Reading JHU model output from", inputloc,"for date", rundate))
   # read in the raw model output scenario data for the scenarios in the SCENARIOS global...
   if( ymd(rundate ) < ymd( "20200623"))
-    return(read_jhu_simfiles( inputloc, rundate, scenarios, IFR ))
+    return(read_jhu_simfiles( inputloc, rundate ))
   
   # open_dataset doesn't like ~, so expand it in path names
   inputloc <- expand_home_dir( inputloc )
@@ -216,12 +226,13 @@ read_jhu_simulation <- function( inputloc, rundate= RUNDATE, scenarios = SCENARI
   simdir <- file.path(inputloc,rundate, "hosp")
 
   sim_arrow <- arrow::open_dataset( simdir, partitioning=PARTITIONING ) %>% collect()
-
+  
   sim_arrow <- sim_arrow %>% 
-    filter( death_rate == IFR & time <= MAXDATE ) %>% 
+    filter( time <= MAXDATE ) %>% 
     mutate( time= as_date( time, tz="UTC"), file_num = sim_id, scenario = rename_scenario( scenario ) ) %>%
+    filter( death_rate == ifr_match( scenario )) %>%
     rename( !!JHU_REMAP_COLS )
-
+    
   sim_arrow  
 }
 
@@ -302,6 +313,7 @@ generate_county_summary <- function( jhu_df )
 
 generate_reff_summary <- function( inputloc, rundate= RUNDATE, IFR = IFR_PREFIX )
 {
+  debug_level<-0
   print( paste("INFO: Summarizing reff curve statistics for simulation" ) )
   
   inputloc <- expand_home_dir( inputloc )
@@ -323,14 +335,22 @@ generate_reff_summary <- function( inputloc, rundate= RUNDATE, IFR = IFR_PREFIX 
     mutate(sim_num = order(sim_id)) %>%
     select(scenario, sim_num, geoid, npi_name, start_date, end_date, reduction) 
   
-  simdate<-crossing( sim_num= unique(snpi$sim_num), date=seq( min(snpi$start_date), max(snpi$end_date), by=1))
+  simdate<-crossing( sim_num= unique(snpi$sim_num), time=seq( min(snpi$start_date), max(snpi$end_date), by=1))
 
-  out <- snpi %>% left_join(simdate) %>% 
-    mutate( r0_factor=if_else( date >= start_date & date <= end_date, 1-reduction, 1 )) %>%
-    group_by(scenario,sim_num, geoid,date) %>% summarize( r0_factor=prod(r0_factor)) %>% ungroup %>% 
-    left_join( spar ) %>% 
-    mutate( r_eff = r0_factor*sim_r0) %>%
-    group_by(scenario,geoid, date) %>%
+  out <- snpi %>% left_join(simdate)
+  out <-out %>% 
+    mutate( r0_factor=if_else( time >= start_date & time <= end_date, 1-reduction, 1 )) 
+  
+  out<- out%>%
+    group_by(scenario,sim_num, geoid,time) %>% summarize( r0_factor=prod(r0_factor)) %>% ungroup 
+  
+  out <- out %>% left_join( spar ) 
+  
+  out <- out %>% 
+    mutate( r_eff = r0_factor*sim_r0) 
+  
+  out<- out %>%
+    group_by(scenario, time, geoid ) %>%
     summarize(
       r_eff_mean = mean(r_eff), 
       r_eff_median = median(r_eff), 
