@@ -26,7 +26,6 @@ DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_i
 JHU_REMAP_COLS = c('hosp_curr','incidH','icu_curr','incidICU','incidI','incidD', "incidC")
 names( JHU_REMAP_COLS) = DATA_OUTPUT_COLS
 
-
 PARTITIONING = c("location","scenario","death_rate","date", "lik_type", "is_final", "sim_id")
 RUNDATE    = format(today(), "%Y%m%d")
 IFR_PREFIX = 'low'
@@ -311,26 +310,26 @@ generate_county_summary <- function( jhu_df )
 }
 
 
-generate_reff_summary <- function( inputloc, rundate= RUNDATE, IFR = IFR_PREFIX )
+generate_reff_summary <- function( inputloc, rundate= RUNDATE )
 {
-  debug_level<-0
   print( paste("INFO: Summarizing reff curve statistics for simulation" ) )
   
   inputloc <- expand_home_dir( inputloc )
   
   # 1. Load spar and snpi files (note code assumes one scenario was run - which applies to last two runs)
+  
   spar <- arrow::open_dataset( file.path(inputloc,rundate,"spar"), partitioning = PARTITIONING ) %>%
     collect() %>%         
-    filter(death_rate==IFR) %>%
     filter(parameter=="R0") %>%
     mutate( scenario = rename_scenario( scenario ) ) %>%
+    filter( death_rate == ifr_match( scenario )) %>%
     mutate(sim_num = order(sim_id)) %>%
     rename(sim_r0 = value) %>%
     select(scenario,sim_num,sim_r0 )
   
   snpi<- arrow::open_dataset( file.path(inputloc,rundate,"snpi"), partitioning = PARTITIONING ) %>% collect %>%
-    filter(death_rate==IFR) %>%
     mutate( scenario = rename_scenario( scenario ) ) %>%
+    filter( death_rate == ifr_match( scenario )) %>%
     group_by(geoid, npi_name )%>%
     mutate(sim_num = order(sim_id)) %>%
     select(scenario, sim_num, geoid, npi_name, start_date, end_date, reduction) 
@@ -430,4 +429,5 @@ process_jhu_simulation <- function( inputloc, outputloc, rundate = RUNDATE, do_c
   
   invisible(inputloc)  
 }
+
 
