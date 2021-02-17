@@ -21,12 +21,15 @@ MAXDATE               = ymd("21000101")
 CA_FIPS_REGEX = "^06[0-9]{3}$"
 
 OUTPUT_SUFFIXES = c( '_mean', '_median', '_q25', '_q75' )
-DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_infect','new_deaths', "new_cases" )
 
+DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_infect','new_deaths', "new_cases" )
 JHU_REMAP_COLS = c('hosp_curr','incidH','icu_curr','incidICU','incidI','incidD', "incidC")
+#DATA_OUTPUT_COLS = c( 'hosp_occup', 'hosp_admit', 'icu_occup','icu_admit','new_infect','new_deaths' )
+#JHU_REMAP_COLS = c('hosp_curr','incidH','icu_curr','incidICU','incidI','incidD')
 names( JHU_REMAP_COLS) = DATA_OUTPUT_COLS
 
 PARTITIONING = c("location","scenario","death_rate","date", "lik_type", "is_final", "sim_id")
+
 RUNDATE    = format(today(), "%Y%m%d")
 IFR_PREFIX = 'low'
 
@@ -200,7 +203,7 @@ rename_scenario <- function( scenario )
 
 ifr_match <- function( scenario )
 {
-  return( if_else( scenario=="Cases", "low", 
+  return( if_else( scenario=="Cases", "med", 
       if_else( scenario == "Deaths", "med",
                IFR_PREFIX
   )))
@@ -223,7 +226,7 @@ read_jhu_simulation <- function( inputloc, rundate= RUNDATE )
   inputloc <- expand_home_dir( inputloc )
   
   simdir <- file.path(inputloc,rundate, "hosp")
-
+  
   sim_arrow <- arrow::open_dataset( simdir, partitioning=PARTITIONING ) %>% collect()
   
   sim_arrow <- sim_arrow %>% 
@@ -310,53 +313,180 @@ generate_county_summary <- function( jhu_df )
 }
 
 
-generate_reff_summary <- function( inputloc, rundate= RUNDATE )
+#' Read all JHU r0 modifiers, create r0 curves, account for the susceptible population for r-effective,
+#' generate summary stats for the state and each county
+#' 
+#'
+generate_reff_summary <- function( inputloc, rundate )
 {
-  print( paste("INFO: Summarizing reff curve statistics for simulation" ) )
-  
   inputloc <- expand_home_dir( inputloc )
   
-  # 1. Load spar and snpi files (note code assumes one scenario was run - which applies to last two runs)
+  reffs <- tibble()
   
-  spar <- arrow::open_dataset( file.path(inputloc,rundate,"spar"), partitioning = PARTITIONING ) %>%
-    collect() %>%         
-    filter(parameter=="R0") %>%
-    mutate( scenario = rename_scenario( scenario ) ) %>%
-    filter( death_rate == ifr_match( scenario )) %>%
-    mutate(sim_num = order(sim_id)) %>%
-    rename(sim_r0 = value) %>%
-    select(scenario,sim_num,sim_r0 )
-  
-  snpi<- arrow::open_dataset( file.path(inputloc,rundate,"snpi"), partitioning = PARTITIONING ) %>% collect %>%
-    mutate( scenario = rename_scenario( scenario ) ) %>%
-    filter( death_rate == ifr_match( scenario )) %>%
-    group_by(geoid, npi_name )%>%
-    mutate(sim_num = order(sim_id)) %>%
-    select(scenario, sim_num, geoid, npi_name, start_date, end_date, reduction) 
-  
-  simdate<-crossing( sim_num= unique(snpi$sim_num), time=seq( min(snpi$start_date), max(snpi$end_date), by=1))
+  spar<-arrow::open_dataset(file.path( inputloc, rundate, "spar"), partitioning = PARTITIONING) %>% collect()
+  for( scenario in unique(spar$scenario))
+  {    
+    cat( "*****", scenario )
 
-  out <- snpi %>% left_join(simdate)
-  out <-out %>% 
-    mutate( r0_factor=if_else( time >= start_date & time <= end_date, 1-reduction, 1 )) 
+    reffs <- generate_reff_scenario( scenario, inputloc, rundate ) %>%
+      bind_rows( reffs )
+  }
+
+  reffs
+}
   
-  out<- out%>%
-    group_by(scenario,sim_num, geoid,time) %>% summarize( r0_factor=prod(r0_factor)) %>% ungroup 
+#' 
+#' Create Reff curve for one scenario
+#' 
+
+generate_reff_scenario <- function( scenario, inputloc, rundate )
+{
+  print( paste("INFO: Summarizing reff curve statistics for simulation, scenario = ", scenario ) )
   
-  out <- out %>% left_join( spar ) 
+  geodata_file <- "geodata.csv" # df with county FIPS ('geoid') and population
   
-  out <- out %>% 
-    mutate( r_eff = r0_factor*sim_r0) 
+  mtr_periods <- 10 # maximum number of periods a non-contiguous intervention is applied in any one county 
   
-  out<- out %>%
-    group_by(scenario, time, geoid ) %>%
-    summarize(
-      r_eff_mean = mean(r_eff), 
-      r_eff_median = median(r_eff), 
-      r_eff_q25 = quantile(r_eff, 0.25), 
-      r_eff_q75 = quantile(r_eff, 0.75),
-    ) %>%
-    ungroup
+  # Download df with county FIPS ('geoid') and population columns
+  
+  geodata<-read_csv( geodata_file, col_types=cols(geoid=col_character())) %>%
+    mutate(geoid=str_pad(geoid, 5, pad = "0"))%>%
+    rename(pop=starts_with("pop"))
+  
+  # Download cumulative infections
+  
+  cumI<-arrow::open_dataset(file.path(inputloc, rundate,"hosp"), 
+                            partitioning = PARTITIONING) %>% 
+    dplyr::filter(lik_type=="global",
+                  is_final=="final", 
+                  scenario==!!scenario,
+                  geoid %in% geodata$geoid) %>%
+    dplyr::select(geoid, time, death_rate, scenario, location, incidI, sim_id) %>%
+    dplyr::collect() %>%
+    dplyr::mutate(sim_id = str_remove(sim_id, "\\..+$"), 
+                  sim_id = as.numeric(sim_id),
+                  time=as.Date(time))
+  
+  
+  cumI<-cumI %>%
+    group_by(geoid, death_rate, scenario, location, sim_id) %>%
+    mutate(cum_inf=cumsum(incidI)) %>%
+    ungroup()
+  
+  # Download NPI estimates
+  
+  spar <- arrow::open_dataset(file.path(inputloc, rundate,'spar'), 
+                              partitioning = PARTITIONING) %>%
+    dplyr::filter(lik_type=="global",
+                  is_final=="final",
+                  scenario==!!scenario, 
+                  parameter=="R0") %>%
+    dplyr::collect() %>% 
+    dplyr::mutate(sim_id = str_remove(sim_id, "\\..+$"), 
+                  sim_id = as.numeric(sim_id)) %>%
+    dplyr::select(r0=value, location, scenario, death_rate, date, sim_id)
+  
+  snpi<- arrow::open_dataset(file.path(inputloc, rundate,'snpi'), 
+                             partitioning = PARTITIONING) %>%
+    dplyr::filter(lik_type=="global",
+                  is_final=="final",
+                  scenario==!!scenario,
+                  geoid %in% geodata$geoid) %>%
+    dplyr::filter(parameter=="r0") %>%
+    dplyr::collect() %>%
+    dplyr::mutate(sim_id = str_remove(sim_id, "\\..+$"), 
+                  sim_id = as.numeric(sim_id)) %>%
+    dplyr::select(-parameter)
+  
+  npi <- snpi %>%
+    dplyr::left_join(spar) %>%
+    dplyr::select(-date)
+  
+  # Expand non-contiguoous interventions to each time period has a row
+  
+  mtr_start <- npi %>%
+    dplyr::select(geoid, scenario, death_rate, starts_with("npi"), start_date) %>%
+    dplyr::distinct() %>%
+    tidyr::separate(start_date, into = as.character(c(1:mtr_periods)), sep=",")
+  
+  mtr_end <- npi %>%
+    dplyr::select(geoid, scenario, death_rate, starts_with("npi"), end_date) %>%
+    dplyr::distinct() %>%
+    tidyr::separate(end_date, into = as.character(c(1:mtr_periods)), sep=",")
+  
+  xx <- tibble()
+  
+  for(i in 1:mtr_periods){
+    
+    xx<-mtr_start %>%
+      dplyr::select(geoid, scenario, death_rate, starts_with("npi"), start_date=as.symbol(i)) %>%
+      dplyr::left_join(mtr_end %>%
+                         dplyr::select(geoid, scenario, death_rate, starts_with("npi"), end_date=as.symbol(i))) %>%
+      tidyr::drop_na() %>%
+      dplyr::right_join(npi%>%
+                          dplyr::select(-start_date, -end_date)) %>%
+      tidyr::drop_na() %>%
+      dplyr::mutate(across(ends_with("date"), ~lubridate::ymd(.x)))%>%
+      dplyr::bind_rows(xx)
+  }
+  
+  npi <- xx
+  
+  # Estimate daily Rt
+  
+  geoiddate<-crossing(geoid=geodata$geoid, time=seq(min(as.Date(npi$start_date)), max(as.Date(npi$end_date)), 1))
+  
+  daily_r<-list()
+  
+  for(i in 1:length(geodata$geoid)){
+    daily_r[[i]]<-npi %>%
+      filter(geoid == geodata$geoid[i])%>%
+      left_join(geoiddate)%>%
+      mutate(sim_id=if_else(start_date>time | end_date<time, NA_real_, sim_id))%>%
+      drop_na() %>%
+      group_by(geoid, sim_id, time, death_rate, scenario, location) %>%
+      mutate(reduction=1-reduction)%>%
+      summarize(reduction=prod(reduction),
+                r0=unique(r0)) %>%
+      mutate(rt=reduction*r0)
+  }
+  
+  daily_r<-bind_rows(daily_r) %>%
+    ungroup()
+  
+  rc<-cumI %>%
+    dplyr::left_join(geodata) %>%
+    dplyr::right_join(daily_r) %>%
+    dplyr::group_by(scenario, time, location) %>%
+    dplyr::mutate(rt=rt*(1-cum_inf/pop), 
+                  weight=pop/sum(pop))
+  
+  # Summarize to get mean and quantiles
+  
+  #probs <- c(0.01, 0.025, seq(0.05, 0.95, by = 0.05), 0.975, 0.99))
+  probs <- c( 0.1, 0.25, 0.5, 0.75, 0.9)
+  rc_state <- rc %>%
+    dplyr::group_by(scenario, time, death_rate, location) %>%
+    dplyr::summarize(x=list(enframe(c(Hmisc::wtd.quantile(rt, weights=weight, normwt=TRUE, probs=probs),
+                                      mean=Hmisc::wtd.mean(rt, weights=weight, normwt=TRUE)),
+                                    "quantile","Rt"))) %>%
+    unnest(x) %>%
+    rename(geoid=location)
+  
+  rc <-rc %>%
+    dplyr::group_by(scenario, time, death_rate, geoid) %>%
+    dplyr::summarize(x=list(enframe(c(quantile(rt, probs=probs),
+                                      mean=mean(rt)),
+                                    "quantile", "Rt"))) %>%
+    unnest(x) %>%
+    dplyr::bind_rows(rc_state) 
+  
+  rc_wider <- rc %>% 
+    pivot_wider( names_from = "quantile", names_prefix = "r_eff_q", values_from = Rt )%>% 
+    rename_with( ~ gsub("%", "", .x, fixed = TRUE )) %>%
+    rename( r_eff_median = r_eff_q50, r_eff_mean = r_eff_qmean)
+  
+  rc_wider
 }
 
 #' Save a summary statistics to appropriate CSVs
